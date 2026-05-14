@@ -1,0 +1,4 @@
+interface:
+  display_name: "GH Repo Cartographer"
+  short_description: "Map GitHub repos to local projects and sync status."
+  default_prompt: "Use $gh-repo-cartographer to inventory my GitHub repositories, match them to local folders, and report sync status."
