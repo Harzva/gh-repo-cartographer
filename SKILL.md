@@ -1,6 +1,6 @@
 ---
 name: gh-repo-cartographer
-description: Inventory locally configured GitHub accounts and repositories, map online GitHub repositories to local Git project folders, verify whether local branches match fetched upstream commits, and produce Markdown/JSON reports for README optimization, repository cleanup, publishing audits, or account migration work. Use when the user asks to list all GitHub repos, find local project locations for GitHub repos, check local-vs-remote version status, audit README targets, or organize repos across Harzva/saihao/Just-Agent style managed accounts.
+description: Inventory locally configured GitHub accounts and repositories, map online GitHub repositories to local Git project folders, verify whether local branches match fetched upstream commits, batch-fetch GitHub Pages and release metadata, and produce Markdown/JSON reports for README optimization, repository cleanup, publishing audits, Pages matrices, release hubs, or account migration work. Use when the user asks to list all GitHub repos, find local project locations for GitHub repos, check local-vs-remote version status, audit README targets, collect Pages URLs/releases, or organize repos across Harzva/saihao/Just-Agent style managed accounts.
 ---
 
 # GH Repo Cartographer
@@ -10,7 +10,7 @@ description: Inventory locally configured GitHub accounts and repositories, map 
 Use the bundled script for deterministic inventory work. From this skill or repository directory:
 
 ```powershell
-python scripts\gh_repo_cartographer.py --output github-repo-map.md --json-output github-repo-map.json
+python scripts\gh_repo_cartographer.py --include-pages --include-releases --output github-repo-map.md --json-output github-repo-map.json
 ```
 
 The script:
@@ -18,6 +18,8 @@ The script:
 - Reads managed account aliases from `gh-account-router` when available.
 - Resolves each alias to its canonical GitHub login with `gh api user`.
 - Lists repositories owned by each resolved login, with a REST API fallback when `gh repo list` GraphQL calls time out.
+- Resolves router URL aliases such as `https://github.com/just-agent, saihao` to the canonical GitHub login.
+- Optionally fetches GitHub Pages status/URL and latest release metadata for every repository.
 - Scans local Git repositories under configured roots.
 - Matches local remotes to `github.com/owner/repo`.
 - Fetches remotes by default, then compares `HEAD` with `@{u}` to report `synced`, `behind`, `ahead`, `diverged`, `no-upstream`, or `no-local-copy`.
@@ -28,6 +30,8 @@ The script:
 - Add account aliases with repeated `--account <alias>`. If omitted, aliases are discovered from `gh-account-router`.
 - Set `GH_ACCOUNT_ROUTER` when `gh-account-router` is installed somewhere other than `~/.codex/skills/gh-account-router/scripts/gh_account_router.py`.
 - Use `--no-fetch` only when the user explicitly wants a faster offline check; mark results as based on stale local remote refs.
+- Use `--include-pages` when building a Pages matrix or homepage preview index.
+- Use `--include-releases` when building a release hub or project matrix with release badges.
 - Use `--max-depth <n>` to widen or narrow local scanning.
 - Use `--output <file>` for a Markdown report and `--json-output <file>` for downstream README automation.
 
@@ -36,6 +40,8 @@ The script:
 Summarize the Markdown report in the final answer:
 
 - Number of remote repositories found.
+- Number of repositories with GitHub Pages.
+- Number of repositories with releases.
 - Number matched to local folders.
 - Repositories that are `behind`, `ahead`, `diverged`, dirty, or missing local copies.
 - Local repositories with GitHub remotes outside the managed accounts.

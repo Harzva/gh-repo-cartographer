@@ -2,7 +2,7 @@
 
 # GH Repo Cartographer
 
-Map your GitHub repositories to local project folders, then see which checkouts are synced, ahead, behind, diverged, dirty, or missing.
+Map your GitHub repositories to local project folders, then see which checkouts are synced, ahead, behind, diverged, dirty, missing, deployed to Pages, or published as releases.
 
 [![CI](https://github.com/Harzva/gh-repo-cartographer/actions/workflows/ci.yml/badge.svg)](https://github.com/Harzva/gh-repo-cartographer/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -41,6 +41,8 @@ GH Repo Cartographer produces a Markdown report for humans and a JSON report for
 | Capability | What it does |
 |---|---|
 | GitHub inventory | Lists repositories owned by one or more authenticated GitHub accounts. |
+| Pages inventory | Optionally fetches GitHub Pages status and public Pages URLs for every repo. |
+| Release inventory | Optionally fetches latest release metadata and release URLs for every repo. |
 | Local discovery | Scans configured roots for Git working trees while skipping heavy folders like `node_modules`, `.venv`, `dist`, and `build`. |
 | Remote matching | Normalizes common GitHub remote URL formats and maps them to `owner/repo`. |
 | Sync status | Optionally fetches remotes, then reports `synced`, `behind`, `ahead`, `diverged`, `no-upstream`, `error`, or `no-local-copy`. |
@@ -52,7 +54,7 @@ GH Repo Cartographer produces a Markdown report for humans and a JSON report for
 ```powershell
 git clone https://github.com/Harzva/gh-repo-cartographer.git
 cd gh-repo-cartographer
-python scripts/gh_repo_cartographer.py --account harzva --scan-root C:\path\to\projects --output github-repo-map.md --json-output github-repo-map.json
+python scripts/gh_repo_cartographer.py --account harzva --include-pages --include-releases --scan-root C:\path\to\projects --output github-repo-map.md --json-output github-repo-map.json
 ```
 
 If you use the companion `gh-account-router` skill, GH Repo Cartographer will automatically look for it at:
@@ -76,6 +78,8 @@ python scripts/gh_repo_cartographer.py `
   --account harzva `
   --account saihao `
   --scan-root C:\path\to\projects `
+  --include-pages `
+  --include-releases `
   --max-depth 6 `
   --output github-repo-map.md `
   --json-output github-repo-map.json
@@ -89,6 +93,8 @@ Common options:
 | `--scan-root <path>` | Scan a local directory for Git repositories. Repeat for multiple roots. |
 | `--max-depth <n>` | Limit recursive scanning depth under each root. |
 | `--no-fetch` | Skip `git fetch --all --prune --quiet` for faster offline checks. |
+| `--include-pages` | Add GitHub Pages status and public URL columns to Markdown/JSON reports. |
+| `--include-releases` | Add latest release metadata and release URL columns to Markdown/JSON reports. |
 | `--output <file>` | Write the Markdown report. |
 | `--json-output <file>` | Write machine-readable inventory JSON. |
 
@@ -121,7 +127,7 @@ The skill prompt is defined in `SKILL.md`, and the app-facing metadata is in `ag
 The JSON report contains:
 
 - `generatedAt`: UTC timestamp for the report;
-- `remoteCount`, `localRepoCount`, `matchedRemoteCount`: top-level counts;
+- `remoteCount`, `pagesCount`, `releaseCount`, `localRepoCount`, `matchedRemoteCount`: top-level counts;
 - `rows`: remote repositories and any local matches;
 - `localOnly`: local Git repositories that do not match the managed GitHub account inventory.
 

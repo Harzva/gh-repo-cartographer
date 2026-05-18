@@ -120,6 +120,40 @@ def gh(account: str | None, args: list[str], retries: int = 2) -> subprocess.Com
     return proc
 
 
+def github_login_from_url(value: str) -> str | None:
+    parsed = urlparse(value.strip())
+    if parsed.netloc.lower() != "github.com":
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    return parts[0] if parts else None
+
+
+def parse_router_account_hints() -> dict[str, str]:
+    if not ROUTER.exists():
+        return {}
+    proc = run([sys.executable, str(ROUTER), "--list"])
+    if proc.returncode != 0:
+        return {}
+
+    hints: dict[str, str] = {}
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line.startswith("-"):
+            continue
+        parts = [part.strip() for part in line[1:].split(",") if part.strip()]
+        login_hint: str | None = None
+        aliases: list[str] = []
+        for part in parts:
+            if part.startswith(("http://", "https://")):
+                login_hint = github_login_from_url(part)
+            else:
+                aliases.append(part)
+        if login_hint:
+            for alias in aliases:
+                hints[alias.lower()] = login_hint
+    return hints
+
+
 def parse_router_accounts() -> list[str]:
     if not ROUTER.exists():
         return []
@@ -320,36 +354,146 @@ def list_remote_repos_rest(account: str) -> tuple[list[dict[str, Any]], str | No
     return repos, None
 
 
+def list_remote_repos_public(login: str) -> tuple[list[dict[str, Any]], str | None]:
+    proc = gh(None, ["api", f"/users/{login}/repos?per_page=100&type=owner&sort=pushed"])
+    if proc.returncode != 0:
+        return [], redact(proc.stderr.strip() or proc.stdout.strip())
+    repo_items = json.loads(proc.stdout or "[]")
+    repos: list[dict[str, Any]] = []
+    for repo in repo_items:
+        repos.append(
+            {
+                "nameWithOwner": repo.get("full_name"),
+                "url": repo.get("html_url"),
+                "description": repo.get("description"),
+                "isPrivate": repo.get("private"),
+                "isArchived": repo.get("archived"),
+                "isFork": repo.get("fork"),
+                "primaryLanguage": {"name": repo.get("language")} if repo.get("language") else None,
+                "pushedAt": repo.get("pushed_at"),
+                "updatedAt": repo.get("updated_at"),
+                "defaultBranchRef": {"name": repo.get("default_branch")},
+                "homepageUrl": repo.get("homepage"),
+                "stargazerCount": repo.get("stargazers_count"),
+                "forkCount": repo.get("forks_count"),
+                "topics": repo.get("topics", []),
+            }
+        )
+    return repos, None
+
+
+def gh_json(account: str | None, path: str, none_on_404: bool = False) -> Any:
+    proc = gh(account, ["api", path])
+    if proc.returncode != 0:
+        output = proc.stderr + proc.stdout
+        if none_on_404 and ("HTTP 404" in output or '"status":"404"' in output or '"status":"409"' in output):
+            return None
+        if account:
+            proc = gh(None, ["api", path])
+            if proc.returncode == 0 and proc.stdout.strip():
+                return json.loads(proc.stdout)
+            output = proc.stderr + proc.stdout
+            if none_on_404 and ("HTTP 404" in output or '"status":"404"' in output or '"status":"409"' in output):
+                return None
+        return None
+    if not proc.stdout.strip():
+        return None
+    return json.loads(proc.stdout)
+
+
+def fetch_pages(account: str | None, name_with_owner: str) -> dict[str, Any] | None:
+    pages = gh_json(account, f"/repos/{name_with_owner}/pages", none_on_404=True)
+    if not pages:
+        return None
+    return {
+        "url": pages.get("html_url"),
+        "status": pages.get("status"),
+        "cname": pages.get("cname"),
+        "custom404": pages.get("custom_404"),
+        "source": pages.get("source"),
+        "buildType": pages.get("build_type"),
+    }
+
+
+def fetch_release(account: str | None, name_with_owner: str) -> dict[str, Any]:
+    latest = gh_json(account, f"/repos/{name_with_owner}/releases/latest", none_on_404=True)
+    sample = gh_json(account, f"/repos/{name_with_owner}/releases?per_page=1", none_on_404=True) or []
+    return {
+        "hasAnyRelease": bool(latest or sample),
+        "latest": None
+        if not latest
+        else {
+            "name": latest.get("name"),
+            "tagName": latest.get("tag_name"),
+            "url": latest.get("html_url"),
+            "publishedAt": latest.get("published_at"),
+            "prerelease": latest.get("prerelease"),
+            "draft": latest.get("draft"),
+        },
+    }
+
+
+def enrich_remote_metadata(remote_repos: list[dict[str, Any]], include_pages: bool, include_releases: bool) -> None:
+    if not include_pages and not include_releases:
+        return
+    for repo in remote_repos:
+        account = repo.get("accountAlias")
+        name_with_owner = repo.get("nameWithOwner")
+        if not name_with_owner:
+            continue
+        if include_pages:
+            repo["pages"] = fetch_pages(account, name_with_owner)
+        if include_releases:
+            repo["release"] = fetch_release(account, name_with_owner)
+
+
 def list_remote_repos(accounts: list[str]) -> list[dict[str, Any]]:
     remotes: list[dict[str, Any]] = []
     seen: set[str] = set()
+    router_hints = parse_router_account_hints()
 
     for account in accounts:
         user_proc = gh(account, ["api", "user", "--jq", ".login"])
         if user_proc.returncode != 0:
-            print(f"warning: cannot resolve GitHub login for {account}: {redact(user_proc.stderr.strip())}", file=sys.stderr)
-            continue
-        login = user_proc.stdout.strip()
-        repo_proc = gh(
-            account,
-            [
-                "repo",
-                "list",
-                login,
-                "--limit",
-                "1000",
-                "--json",
-                repo_json_fields(),
-            ],
-        )
-        if repo_proc.returncode != 0:
-            fallback_repos, fallback_error = list_remote_repos_rest(account)
-            if fallback_error:
-                print(f"warning: cannot list repos for {login}: {fallback_error}", file=sys.stderr)
-                continue
-            repo_items = fallback_repos
+            login = router_hints.get(account.lower())
+            if not login:
+                public_repos, public_error = list_remote_repos_public(account)
+                if public_error:
+                    print(f"warning: cannot resolve GitHub login for {account}: {redact(user_proc.stderr.strip())}", file=sys.stderr)
+                    continue
+                login = account
+                repo_items = public_repos
+            else:
+                repo_items, public_error = list_remote_repos_public(login)
+                if public_error:
+                    print(f"warning: cannot list repos for {login}: {public_error}", file=sys.stderr)
+                    continue
         else:
-            repo_items = json.loads(repo_proc.stdout or "[]")
+            login = user_proc.stdout.strip()
+            repo_proc = gh(
+                account,
+                [
+                    "repo",
+                    "list",
+                    login,
+                    "--limit",
+                    "1000",
+                    "--json",
+                    repo_json_fields(),
+                ],
+            )
+            if repo_proc.returncode != 0:
+                fallback_repos, fallback_error = list_remote_repos_rest(account)
+                if fallback_error:
+                    public_repos, public_error = list_remote_repos_public(login)
+                    if public_error:
+                        print(f"warning: cannot list repos for {login}: {fallback_error}", file=sys.stderr)
+                        continue
+                    repo_items = public_repos
+                else:
+                    repo_items = fallback_repos
+            else:
+                repo_items = json.loads(repo_proc.stdout or "[]")
 
         for repo in repo_items:
             key = normalize_repo_key(repo.get("nameWithOwner"))
@@ -412,6 +556,8 @@ def merge_inventory(remote_repos: list[dict[str, Any]], local_repos: list[LocalR
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "remoteCount": len(remote_repos),
+        "pagesCount": sum(1 for repo in remote_repos if repo.get("pages")),
+        "releaseCount": sum(1 for repo in remote_repos if (repo.get("release") or {}).get("hasAnyRelease")),
         "localRepoCount": len(local_repos),
         "matchedRemoteCount": sum(1 for row in rows if row["localMatches"]),
         "rows": rows,
@@ -428,10 +574,20 @@ def cell(value: Any) -> str:
 
 def render_markdown(inventory: dict[str, Any], scan_roots: list[Path], fetched: bool) -> str:
     rows = inventory["rows"]
+    has_pages_column = any((row["remote"].get("pages") for row in rows))
+    has_release_column = any(((row["remote"].get("release") or {}).get("hasAnyRelease") for row in rows))
+    headers = ["Repository", "Account", "Visibility"]
+    if has_pages_column:
+        headers.append("Pages")
+    if has_release_column:
+        headers.append("Release")
+    headers.extend(["Local path", "Branch", "Sync", "Ahead", "Behind", "Dirty", "Last pushed"])
     summary = [
         "# GitHub Repo Cartography",
         "",
         f"- Remote repositories: {inventory['remoteCount']}",
+        f"- Repositories with GitHub Pages: {inventory.get('pagesCount', 0)}",
+        f"- Repositories with releases: {inventory.get('releaseCount', 0)}",
         f"- Local Git repositories scanned: {inventory['localRepoCount']}",
         f"- Remote repositories with local matches: {inventory['matchedRemoteCount']}",
         f"- Version check used fetch: {'yes' if fetched else 'no'}",
@@ -439,8 +595,8 @@ def render_markdown(inventory: dict[str, Any], scan_roots: list[Path], fetched: 
         "",
         "## Remote to Local Map",
         "",
-        "| Repository | Account | Visibility | Local path | Branch | Sync | Ahead | Behind | Dirty | Last pushed |",
-        "|---|---|---|---|---|---:|---:|---:|---:|---|",
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join("---" for _ in headers) + "|",
     ]
     for row in rows:
         remote = row["remote"]
@@ -448,23 +604,31 @@ def render_markdown(inventory: dict[str, Any], scan_roots: list[Path], fetched: 
         for index, local in enumerate(matches):
             repo_name = remote["nameWithOwner"] if index == 0 else ""
             visibility = "private" if remote.get("isPrivate") else "public"
+            values = [
+                cell(repo_name),
+                cell(remote.get("accountAlias")),
+                cell(visibility),
+            ]
+            if has_pages_column:
+                pages = remote.get("pages")
+                values.append(cell(pages.get("url") if pages else ""))
+            if has_release_column:
+                release = remote.get("release") or {}
+                latest = release.get("latest") or {}
+                values.append(cell(latest.get("url") if latest else "yes" if release.get("hasAnyRelease") else ""))
+            values.extend(
+                [
+                    cell(local.get("path") if local else ""),
+                    cell(local.get("branch") if local else row.get("defaultBranch")),
+                    cell(local.get("status") if local else "no-local-copy"),
+                    cell(local.get("ahead") if local else ""),
+                    cell(local.get("behind") if local else ""),
+                    cell("yes" if local and local.get("dirty") else "no" if local else ""),
+                    cell(remote.get("pushedAt")),
+                ]
+            )
             summary.append(
-                "| "
-                + " | ".join(
-                    [
-                        cell(repo_name),
-                        cell(remote.get("accountAlias")),
-                        cell(visibility),
-                        cell(local.get("path") if local else ""),
-                        cell(local.get("branch") if local else row.get("defaultBranch")),
-                        cell(local.get("status") if local else "no-local-copy"),
-                        cell(local.get("ahead") if local else ""),
-                        cell(local.get("behind") if local else ""),
-                        cell("yes" if local and local.get("dirty") else "no" if local else ""),
-                        cell(remote.get("pushedAt")),
-                    ]
-                )
-                + " |"
+                "| " + " | ".join(values) + " |"
             )
 
     if inventory["localOnly"]:
@@ -502,6 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scan-root", action="append", default=[], help="Directory to scan for local Git repositories. Repeatable.")
     parser.add_argument("--max-depth", type=int, default=6, help="Maximum directory depth to scan under each root.")
     parser.add_argument("--no-fetch", action="store_true", help="Skip git fetch before comparing local and upstream commits.")
+    parser.add_argument("--include-pages", action="store_true", help="Fetch GitHub Pages status and public URL for each repository.")
+    parser.add_argument("--include-releases", action="store_true", help="Fetch latest release metadata for each repository.")
     parser.add_argument("--output", help="Write Markdown report to this path instead of stdout.")
     parser.add_argument("--json-output", help="Write machine-readable JSON inventory to this path.")
     return parser
@@ -520,6 +686,7 @@ def main() -> int:
         return 2
 
     remote_repos = list_remote_repos(accounts)
+    enrich_remote_metadata(remote_repos, include_pages=args.include_pages, include_releases=args.include_releases)
     git_roots = find_git_roots(scan_roots, args.max_depth)
     local_repos = [inspect_local_repo(path, fetch=not args.no_fetch) for path in git_roots]
     inventory = merge_inventory(remote_repos, local_repos)
